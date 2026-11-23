@@ -1,0 +1,12 @@
+id: ROOT
+name: Example Web application
+type: FOLDER
+dependencies: []
+description: A small example for learning the agent input contract.
+children:
+  - id: REQ-1
+    name: Welcome page
+    type: ATOMIC
+    dependencies: []
+    description: Show a page with the heading "Welcome" and a short introduction.
+    children: []

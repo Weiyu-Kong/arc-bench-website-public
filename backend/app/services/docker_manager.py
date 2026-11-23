@@ -1,0 +1,311 @@
+import json
+import os
+from pathlib import Path
+import time
+
+import docker
+from docker.errors import APIError, BuildError, DockerException, ImageNotFound, NotFound
+
+from app.core.config import get_settings
+from app.services.model_provider_service import ModelProviderService
+
+
+class DockerManager:
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        self.model_providers = ModelProviderService(self.settings.runtime_config_path)
+        try:
+            self.client = docker.from_env()
+            self.client.ping()
+        except DockerException as exc:
+            raise RuntimeError(self._format_daemon_error(exc)) from exc
+
+    def _runner_image(self) -> str:
+        return self.settings.runner_image
+
+    def _runner_context_dir(self) -> Path:
+        return self.settings.runner_context_dir
+
+    def _runner_dockerfile(self) -> str:
+        return self.settings.runner_dockerfile
+
+    def _host_workspace_path(self, workspace_path: str | Path) -> Path:
+        workspace = Path(workspace_path).resolve()
+        host_root = self.settings.executor_workspace_host_root
+        if host_root is None:
+            return workspace
+        try:
+            relative_path = workspace.relative_to(self.settings.executor_workspace_root.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Runner workspace '{workspace}' is outside ARCBENCH_EXECUTOR_WORKSPACE_ROOT"
+            ) from exc
+        return host_root.resolve() / relative_path
+
+    def ensure_image(self, log_callback=None) -> None:
+        runner_image = self._runner_image()
+        needs_build = False
+        try:
+            image = self.client.images.get(runner_image)
+            if self._is_image_stale(image):
+                needs_build = True
+                if log_callback is not None:
+                    log_callback(f"Runner source newer than image, rebuilding: {runner_image}")
+            elif log_callback is not None:
+                log_callback(f"Using existing runner image: {runner_image}")
+        except ImageNotFound:
+            needs_build = True
+
+        if not needs_build:
+            return
+
+        if not self.settings.runner_build_on_demand:
+            raise RuntimeError(
+                f"Runner image '{runner_image}' is unavailable or stale. "
+                "Publish a tested immutable runner image before accepting evaluation runs. "
+                "Set ARCBENCH_RUNNER_BUILD_ON_DEMAND=true only for local development."
+            )
+
+        try:
+            if log_callback is not None:
+                log_callback(f"Building runner image: {runner_image}")
+            _, build_logs = self.client.images.build(
+                path=str(self._runner_context_dir()),
+                dockerfile=self._runner_dockerfile(),
+                tag=runner_image,
+                rm=True,
+                pull=False,
+                nocache=False,
+                forcerm=True,
+            )
+            if log_callback is not None:
+                for entry in build_logs:
+                    line = self._stringify_build_log_entry(entry)
+                    if line:
+                        log_callback(line)
+        except BuildError as exc:
+            if log_callback is not None:
+                for entry in getattr(exc, "build_log", []) or []:
+                    line = self._stringify_build_log_entry(entry)
+                    if line:
+                        log_callback(line)
+            raise RuntimeError(self._format_build_error(exc)) from exc
+        except DockerException as exc:
+            raise RuntimeError(self._format_docker_api_error("Failed to build runner image", exc)) from exc
+
+    def _is_image_stale(self, image) -> bool:
+        source_paths = [
+            self.settings.runner_context_dir / self.settings.runner_dockerfile,
+            self.settings.runner_context_dir / "backend" / "runner" / "agent-runner" / "run_submission.py",
+            self.settings.runner_context_dir / "backend" / "runner" / "agent-runner" / "smoke_test.py",
+        ]
+        if any(not path.exists() for path in source_paths):
+            return False
+        source_mtime = max(path.stat().st_mtime for path in source_paths)
+        created_at = str(image.attrs.get("Created", ""))
+        if not created_at:
+            return False
+        try:
+            from datetime import datetime, timezone
+
+            # Docker reports something like "2026-06-25T20:27:24.123456789Z".
+            created_at_normalized = created_at.split(".")[0] + "+00:00" if created_at.endswith("Z") else created_at
+            created_time = datetime.fromisoformat(created_at_normalized).astimezone(timezone.utc).timestamp()
+            return source_mtime > created_time
+        except Exception:  # noqa: BLE001
+            return False
+
+    def create_container(
+        self,
+        submission_id: str,
+        workspace_path: str | Path,
+        *,
+        openai_api_key: str,
+        openai_base_url: str,
+        model: str,
+        visual_model: str | None = None,
+        github_email: str | None = None,
+        github_username: str | None = None,
+        runner_kind: str = "python",
+        generation: int,
+        model_proxy: bool = False,
+        log_callback=None,
+    ):
+        self.ensure_image(log_callback=log_callback)
+        image = self.client.images.get(self._runner_image())
+        arc_dir = Path(workspace_path).resolve() / "template" / ".arc"
+        arc_dir.mkdir(parents=True, exist_ok=True)
+        (arc_dir / "runner-image.json").write_text(
+            json.dumps(
+                {
+                    "reference": self._runner_image(),
+                    "runner_kind": runner_kind,
+                    "id": str(image.id),
+                    "digest": next(iter(image.attrs.get("RepoDigests", []) or []), None),
+                    "created": image.attrs.get("Created"),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        environment = {
+            **self.model_providers.build_container_environment(
+                api_key=openai_api_key,
+                base_url=openai_base_url,
+                model=model,
+                visual_model=visual_model,
+            ),
+            "PIP_INDEX_URL": self.settings.pip_index_url,
+            "PIP_TRUSTED_HOST": self.settings.pip_trusted_host,
+            "ARCBENCH_PIP_INDEX_URL": self.settings.pip_index_url,
+            "ARCBENCH_PIP_TRUSTED_HOST": self.settings.pip_trusted_host,
+        }
+        pip_extra_index_urls = self.settings.get_pip_extra_index_urls()
+        if model_proxy:
+            environment.update({
+                "ANTHROPIC_API_KEY": openai_api_key,
+                "ANTHROPIC_BASE_URL": openai_base_url.rstrip("/").removesuffix("/v1"),
+                "OPENAI_API_BASE": openai_base_url,
+            })
+        if pip_extra_index_urls:
+            extra_indexes = " ".join(pip_extra_index_urls)
+            environment["PIP_EXTRA_INDEX_URL"] = extra_indexes
+            environment["ARCBENCH_PIP_EXTRA_INDEX_URL"] = extra_indexes
+        if github_email and github_email.strip():
+            environment["ARC_GIT_USER_EMAIL"] = github_email.strip()
+        if github_username and github_username.strip():
+            environment["ARC_GIT_USER_NAME"] = github_username.strip()
+        container_kwargs = {
+            "name": self.container_name(submission_id, generation),
+            "detach": True,
+            "environment": environment,
+            "volumes": {str(self._host_workspace_path(workspace_path)): {"bind": "/workspace", "mode": "rw"}},
+            "mem_limit": self.settings.runner_memory_limit,
+            "nano_cpus": self.settings.runner_cpu_limit * 1_000_000_000,
+            "working_dir": "/workspace",
+            "command": ["python3", "/opt/arcbench/run_submission.py"],
+        }
+        configured_runner_user = str(self.settings.runner_user or "").strip()
+        container_kwargs["user"] = configured_runner_user or f"{os.getuid()}:{os.getgid()}"
+        network_mode = (self.settings.runner_network_mode or "").strip()
+        if network_mode:
+            container_kwargs["network_mode"] = network_mode
+        dns_servers = self.model_providers.get_runner_dns_servers()
+        if dns_servers:
+            container_kwargs["dns"] = dns_servers
+        extra_hosts = self.settings.get_runner_extra_hosts()
+        if extra_hosts:
+            container_kwargs["extra_hosts"] = extra_hosts
+        return self.client.containers.create(
+            self._runner_image(),
+            **container_kwargs,
+        )
+
+    @staticmethod
+    def start_container(container) -> None:
+        container.start()
+
+    @staticmethod
+    def stop_container(container) -> None:
+        container.stop(timeout=5)
+
+    @staticmethod
+    def kill_container_process(container, *, signal_name: str = "SIGTERM") -> None:
+        container.kill(signal=signal_name)
+
+    @staticmethod
+    def remove_container(container) -> None:
+        container.remove(force=True)
+
+    @staticmethod
+    def container_name(submission_id: str, generation: int) -> str:
+        return f"arcbench-{submission_id}-g{generation}"
+
+    def remove_submission_container(self, submission_id: str, generation: int) -> bool:
+        """Force-remove a runner and confirm Docker no longer reports it."""
+        container_name = self.container_name(submission_id, generation)
+        try:
+            container = self.client.containers.get(container_name)
+        except NotFound:
+            return False
+        container.remove(force=True)
+        for _ in range(30):
+            try:
+                self.client.containers.get(container_name)
+            except NotFound:
+                return True
+            time.sleep(0.1)
+        raise RuntimeError(f"Runner container '{container_name}' was not removed by Docker")
+
+    def remove_all_submission_containers(self, submission_id: str) -> int:
+        """Remove every generation container for destructive run deletion."""
+        prefix = f"arcbench-{submission_id}-g"
+        removed = 0
+        for container in self.client.containers.list(all=True):
+            if container.name.startswith(prefix):
+                container.remove(force=True)
+                removed += 1
+        return removed
+
+    @staticmethod
+    def collect_logs(container) -> tuple[str, str]:
+        stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+        stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+        return stdout, stderr
+
+    @staticmethod
+    def exec(container, command: list[str], workdir: str = "/workspace") -> tuple[int, str]:
+        result = container.exec_run(command, workdir=workdir, stdout=True, stderr=True)
+        output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, (bytes, bytearray)) else str(result.output)
+        return int(result.exit_code), output
+
+    @staticmethod
+    def kill_agent_process(container, *, signal_name: str = "TERM") -> tuple[int, str]:
+        # Target the uploaded agent entrypoint without touching run_submission.py itself.
+        return DockerManager.exec(container, ["pkill", f"-{signal_name}", "-f", "main.py|index.js|index.ts"])
+
+    @staticmethod
+    def _format_daemon_error(exc: DockerException) -> str:
+        message = str(exc)
+        lowered = message.lower()
+        if "pipe/docker_engine" in lowered or "docker desktop" in lowered:
+            return "Docker daemon is unavailable. Start Docker Desktop and make sure the backend process can access the Docker engine."
+        if "/var/run/docker.sock" in lowered or "permission denied" in lowered:
+            return "Docker daemon is unavailable. Make sure the Docker service is running and the current user has permission to access the Docker socket."
+        return f"Docker daemon is unavailable: {message}"
+
+    @staticmethod
+    def _format_build_error(exc: BuildError) -> str:
+        message = str(exc)
+        lowered = message.lower()
+        if "failed to resolve reference" in lowered and "not found" in lowered:
+            return f"Failed to build runner image. The configured base image tag could not be found: {message}"
+        return f"Failed to build runner image: {message}"
+
+    @staticmethod
+    def _format_docker_api_error(prefix: str, exc: DockerException) -> str:
+        message = str(exc)
+        if isinstance(exc, APIError):
+            return f"{prefix}. Docker API error: {message}"
+        return f"{prefix}: {message}"
+
+    @staticmethod
+    def _stringify_build_log_entry(entry: dict) -> str:
+        stream = entry.get("stream")
+        if stream:
+            return stream.strip()
+        error = entry.get("error") or entry.get("errorDetail", {}).get("message")
+        if error:
+            return f"ERROR: {error}"
+        status = entry.get("status")
+        progress = entry.get("progress")
+        identifier = entry.get("id")
+        if status:
+            parts = [status]
+            if identifier:
+                parts.append(identifier)
+            if progress:
+                parts.append(progress)
+            return " ".join(parts).strip()
+        return ""

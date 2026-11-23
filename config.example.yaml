@@ -1,0 +1,62 @@
+# Copy this file to config.yaml. The real file is ignored by Git.
+# Required: the application refuses to start without a PostgreSQL URL.
+# Environment variable ARCBENCH_DATABASE_URL takes precedence over this value.
+database_url: postgresql+psycopg://arcbench:URL_ENCODED_PASSWORD@127.0.0.1:5432/arcbench?sslmode=prefer
+
+# Dedicated Bearer token for /api/admin/* operational endpoints. Generate with:
+# python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+admin:
+  api_token: CHANGE_ME_LONG_RANDOM_ADMIN_TOKEN
+
+# Enable after migrating the database and configuring Resend + shared Redis.
+# Environment variables ARCBENCH_EMAIL_* and ARCBENCH_RESEND_API_KEY take precedence.
+email_verification:
+  enabled: false
+  # Prefer ARCBENCH_RESEND_API_KEY for secrets. Never commit a real key.
+  resend_api_key: ""
+  from: "ARC-Bench <noreply@auth.arc-bench.com>"
+  code_ttl_seconds: 600
+  resend_interval_seconds: 60
+  # Reserve some of Resend Free's 100 daily emails for other uses.
+  daily_send_limit: 90
+
+# Values are injected only into the runner container selected for a submission.
+environment:
+  # Docker DNS servers for every runner container. Use a YAML list or a comma-separated string.
+  ARCBENCH_RUNNER_DNS_SERVERS:
+    - 223.5.5.5
+    - 1.1.1.1
+
+# Defaults used when a submission leaves these optional fields blank.
+# API keys are supplied by users at submission time and are never configured here.
+model_defaults:
+  OPENAI_BASE_URL: https://api.arc-bench.com/v1
+
+# Integrated external-model metering. The URL must be reachable FROM runners.
+# API and Executor must use matching settings. No separate gateway is needed.
+model_proxy:
+  enabled: false
+  base_url: https://YOUR_WEBSITE_DOMAIN/api/model-proxy/v1
+  # Optional override; defaults to the bundled public price file.
+  # Relative paths resolve from the project root, not the process working directory.
+  pricing_path: backend/app/resources/model_pricing.public.yaml
+  # 0 disables proxy read-idle and total-request timeouts.
+  read_timeout_seconds: 0
+  request_timeout_seconds: 0
+  max_concurrent: 64
+  max_concurrent_per_run: 8
+  # Set false if an upstream rejects the added stream_options.include_usage.
+  # This does not remove stream_options explicitly supplied by an agent.
+  request_stream_usage: true
+
+# Optional legacy ONR accounting and historical evaluation-key cleanup.
+# New submissions use user-owned keys and model_proxy; no credits are issued.
+# Prefer setting these as ARCBENCH_METER_* environment variables in production.
+meter:
+  meter_base_url: https://meter.example.com
+  meter_admin_base_url: https://meter-admin.example.com
+  meter_admin_token: CHANGE_ME_LONG_RANDOM_ONR_ADMIN_TOKEN
+
+visual:
+  VISUAL_API_KEY: CHANGE_ME
+  VISUAL_BASE_URL: https://api.example.com/v1

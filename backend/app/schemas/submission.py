@@ -1,0 +1,276 @@
+from datetime import datetime
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class SubmissionVisualEvent(BaseModel):
+    type: str
+    node_id: str
+    phase: str
+    status: str
+    timestamp: str
+    message: str | None = None
+
+
+class SubmissionRunnerEvent(BaseModel):
+    event_id: str
+    timestamp: str
+    stage: str
+    status: str
+    summary: str
+    heartbeat: bool = False
+    artifact_reference: str | None = None
+
+
+class StepState(BaseModel):
+    key: str
+    title: str
+    status: str
+    description: str
+    logs: list[str] = Field(default_factory=list)
+
+
+class SubmissionSummary(BaseModel):
+    id: str
+    display_name: str | None
+    model_name: str | None
+    catalog: str
+    competition_id: str | None
+    credential_mode: str
+    requirement_id: str | None
+    runtime: str
+    agent_source: str
+    original_filename: str
+    created_at: datetime
+
+
+class RunSummary(BaseModel):
+    id: str
+    submission_id: str
+    display_name: str | None = None
+    model_name: str | None = None
+    original_filename: str | None = None
+    catalog: str
+    competition_id: str | None = None
+    billing_mode: str = "self_funded"
+    evaluation_started_at: datetime | None = None
+    settled_at: datetime | None = None
+    requirement_id: str
+    runtime: str
+    agent_source: str
+    status: str
+    score: float | None
+    test_pass_rate: float | None
+    passed_count: int
+    failed_count: int
+    run_duration_seconds: int | None
+    token_count: int | None
+    token_cost_usd: float | None
+    token_cost_currency: str | None
+    cost_source: str | None = None
+    cost_complete: bool | None = None
+    feature_implemented_count: int
+    feature_total_count: int
+    feature_implementation_rate: float | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    failure_reason: str | None
+
+
+class RunDetail(RunSummary):
+    steps: list[StepState]
+    stdout_path: str | None
+    stderr_path: str | None
+    result_path: str | None
+    workspace_path: str | None
+    logs_available: bool
+    tests: list[dict]
+    node_states: dict[str, str] = Field(default_factory=dict)
+    can_pause: bool = False
+    can_resume: bool = False
+    can_rewind: bool = False
+    can_manual_edit: bool = False
+    manual_edit_node_id: str | None = None
+    manual_edit_phase: str | None = None
+    manual_edit_dirty: bool = False
+    pause_available: bool = False
+    can_cancel: bool = False
+    can_continue: bool = False
+
+
+class SubmissionEditableTaskPayload(BaseModel):
+    requirements_md: str
+    requirements_yaml: str
+    prerequisites_md: str
+    edited_node_id: str | None = None
+
+
+class SubmissionRewindPayload(BaseModel):
+    commit_oid: str = Field(min_length=7, max_length=64)
+
+
+class SubmissionTddRerunPayload(BaseModel):
+    test_id: str = Field(min_length=1, max_length=256)
+
+
+class SubmissionPreviewStatus(BaseModel):
+    available: bool
+    stale: bool = False
+    preview_url: str | None = None
+    workspace_head_oid: str | None = None
+    preview_head_oid: str | None = None
+    error: str | None = None
+    status: str | None = None
+    preview_id: str | None = None
+    generation: int | None = None
+    requested_at: datetime | None = None
+    ready_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class SubmissionCreateResponse(BaseModel):
+    submission: SubmissionSummary
+
+
+class BulkDeletePayload(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BulkDeleteSkippedItem(BaseModel):
+    id: str
+    reason: str
+
+
+class BulkDeleteResult(BaseModel):
+    deleted_ids: list[str] = Field(default_factory=list)
+    skipped: list[BulkDeleteSkippedItem] = Field(default_factory=list)
+
+
+class RunCreateResponse(BaseModel):
+    run: RunSummary
+
+
+# Temporary import aliases keep ancillary run-detail endpoints compatible while
+# callers are moved from the legacy /submissions API to /runs.
+SubmissionDetail = RunDetail
+SubmissionRerunResponse = RunCreateResponse
+
+
+class SubmissionManualEditCommitPreview(BaseModel):
+    message: str
+    node_id: str | None = None
+    phase: str | None = None
+    dirty: bool = False
+    dirty_files: list[str] = Field(default_factory=list)
+
+
+class SubmissionLogs(BaseModel):
+    events: str
+    stdout: str
+    stderr: str
+    console: str = ""
+    log_offset: int = 0
+    last_event_id: str | None = None
+    visual_events: list[SubmissionVisualEvent] = Field(default_factory=list)
+    runner_events: list[SubmissionRunnerEvent] = Field(default_factory=list)
+    runner_event_lines: list[str] = Field(default_factory=list)
+
+
+class SubmissionTraceabilityInterface(BaseModel):
+    interface_id: str
+    req_ids: list[str] = Field(default_factory=list)
+    type: str
+    content: str
+    file_path: str
+    first_line: str | None = None
+    implemented: bool
+    callers: list[str] = Field(default_factory=list)
+    callees: list[str] = Field(default_factory=list)
+
+
+class SubmissionTraceabilityTest(BaseModel):
+    test_id: str
+    req_id: str
+    scenario_id: str | None = None
+    type: str
+    file_path: str
+    first_line: str | None = None
+    status: str | None = None
+    content: str | None = None
+
+
+class SubmissionTraceabilityPayload(BaseModel):
+    interfaces: list[SubmissionTraceabilityInterface] = Field(default_factory=list)
+    tests: list[SubmissionTraceabilityTest] = Field(default_factory=list)
+
+
+class SubmissionCommitChangedFile(BaseModel):
+    file_path: str
+    change_type: str
+    old_file_path: str | None = None
+
+
+class SubmissionCommitHistoryEntry(BaseModel):
+    oid: str
+    short_oid: str
+    committed_at: str = ""
+    message: str
+    node_id: str | None = None
+    phase: str | None = None
+    summary: str | None = None
+    changed_files: list[SubmissionCommitChangedFile] = Field(default_factory=list)
+
+
+class SubmissionCommitHistoryPayload(BaseModel):
+    availability: str = "available"
+    commits: list[SubmissionCommitHistoryEntry] = Field(default_factory=list)
+
+
+class SubmissionSourcePayload(BaseModel):
+    kind: str
+    file_path: str
+    language: str
+    content: str
+    first_line: int
+
+
+class WorkspaceFileEntry(BaseModel):
+    path: str
+    name: str
+    is_directory: bool
+    children: Optional[List['WorkspaceFileEntry']] = None
+
+
+WorkspaceFileEntry.model_rebuild()
+
+
+class WorkspaceFileListPayload(BaseModel):
+    files: List[WorkspaceFileEntry]
+
+
+class FileUpdatePayload(BaseModel):
+    path: str
+    content: str
+
+
+class TestCreatePayload(BaseModel):
+    test_id: str
+    req_id: str
+    test_type: str  # "Unit" | "Integration" | "E2E"
+    scenario_id: Optional[str] = None
+    file_path: Optional[str] = None
+
+
+class TestCreateResponse(BaseModel):
+    test_id: str
+    req_id: str
+    test_type: str
+    file_path: str
+
+
+class TestType:
+    UNIT = "Unit"
+    INTEGRATION = "Integration"
+    E2E = "E2E"

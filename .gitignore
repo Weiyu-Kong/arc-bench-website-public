@@ -1,0 +1,11 @@
+.env
+config.yaml
+source.local.sh
+backend/.venv
+frontend/node_modules
+frontend/dist
+__pycache__
+*.pyc
+runtime/
+data/
+backups/

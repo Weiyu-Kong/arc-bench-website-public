@@ -1,0 +1,165 @@
+import { Children, isValidElement, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+import DescriptionAttachmentPreview from "./DescriptionAttachmentPreview";
+import { inferAttachmentKind, looksLikeManagedAttachmentPath } from "../../lib/descriptionMedia";
+
+export type Heading = {
+  level: number;
+  text: string;
+  id: string;
+};
+
+export function slugify(input: string) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function extractRequirementId(text: string): string | null {
+  const match = /^([A-Za-z]+(?:[-_]\d+)+(?:[-_]\d+)*)\b/.exec(text.trim());
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function extractTextContent(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    return node.map((child) => extractTextContent(child)).join("");
+  }
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return extractTextContent(node.props.children);
+  }
+  return "";
+}
+
+export function extractHeadings(markdown: string): Heading[] {
+  return markdown
+    .split("\n")
+    .flatMap((line) => {
+      const match = /^(##|###)\s+(.+)$/.exec(line.trim());
+      if (!match) {
+        return [];
+      }
+      return [
+        {
+          level: match[1].length,
+          text: match[2].trim(),
+          id: slugify(match[2].trim()),
+        },
+      ];
+    });
+}
+
+function joinResourceUrl(baseUrl: string, relativePath: string) {
+  if (!baseUrl) {
+    return relativePath;
+  }
+
+  const [basePath, query = ""] = baseUrl.split("?");
+  const normalizedBasePath = basePath.endsWith("/") ? basePath : `${basePath}/`;
+  const normalizedRelativePath = relativePath.replace(/^\/+/, "");
+  return query
+    ? `${normalizedBasePath}${normalizedRelativePath}?${query}`
+    : `${normalizedBasePath}${normalizedRelativePath}`;
+}
+
+function rewriteResourceLinks(markdown: string, resourceDir: "assets" | "reference", baseUrl: string) {
+  if (!baseUrl) {
+    return markdown;
+  }
+
+  const patterns = resourceDir === "assets"
+    ? [/\(\.\/assets\/([^)]+)\)/g, /\(assets\/([^)]+)\)/g]
+    : [/\(\.\/reference\/([^)]+)\)/g, /\(reference\/([^)]+)\)/g];
+
+  return patterns.reduce(
+    (content, pattern) => content.replace(pattern, (_match, relativePath: string) => `(${joinResourceUrl(baseUrl, relativePath)})`),
+    markdown,
+  );
+}
+
+export default function MarkdownDocument({
+  markdown,
+  assetsBaseUrl,
+  referencesBaseUrl,
+}: {
+  markdown: string;
+  assetsBaseUrl: string;
+  referencesBaseUrl: string;
+}) {
+  const rewrittenMarkdown = rewriteResourceLinks(
+    rewriteResourceLinks(markdown, "reference", referencesBaseUrl),
+    "assets",
+    assetsBaseUrl,
+  );
+
+  return (
+    <div className="readme-content" data-i18n-skip>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h1 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h1>;
+          },
+          h2: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h2 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h2>;
+          },
+          h3: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h3 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h3>;
+          },
+          h4: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h4 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h4>;
+          },
+          h5: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h5 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h5>;
+          },
+          h6: ({ children }) => {
+            const text = extractTextContent(Children.toArray(children)).trim();
+            return <h6 id={slugify(text)} data-requirement-id={extractRequirementId(text) ?? undefined}>{children}</h6>;
+          },
+          img: ({ src = "", alt = "" }) => (
+            <DescriptionAttachmentPreview
+              variant="markdown"
+              attachment={{
+                alt,
+                extension: "",
+                kind: "image",
+                rawPath: src,
+                src,
+              }}
+            />
+          ),
+          a: ({ href = "", children }) => {
+            const label = extractTextContent(Children.toArray(children)).trim() || href;
+            if (looksLikeManagedAttachmentPath(href) || inferAttachmentKind(href) !== "file") {
+              return (
+                <DescriptionAttachmentPreview
+                  variant="markdown"
+                  attachment={{
+                    alt: label,
+                    extension: "",
+                    kind: inferAttachmentKind(href),
+                    rawPath: href,
+                    src: href,
+                  }}
+                />
+              );
+            }
+            return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+          },
+        }}
+      >
+        {rewrittenMarkdown}
+      </ReactMarkdown>
+    </div>
+  );
+}

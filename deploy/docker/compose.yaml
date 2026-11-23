@@ -1,0 +1,131 @@
+name: arc-bench-website
+
+services:
+  runner-check:
+    image: ${ARCBENCH_RUNNER_IMAGE:-${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-runner:latest}
+    build:
+      context: ../..
+      dockerfile: backend/runner/Dockerfile
+    entrypoint: ["python3"]
+    command: ["/opt/arcbench/smoke_test.py"]
+    restart: "no"
+
+  migrate:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-api:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    command: ["arcbench-migrate"]
+    restart: "no"
+
+  frontend:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-frontend:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/frontend.Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+  api:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-api:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    expose:
+      - "8000"
+    environment:
+      ARCBENCH_API_WORKERS: ${ARCBENCH_API_WORKERS:-32}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - arcbench-shared:/mnt/arcbench
+      - arcbench-api-state:/var/lib/arcbench
+
+  dispatcher:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-api:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    command: ["arcbench-dispatcher"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  recovery:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-api:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/api.Dockerfile
+    command: ["arcbench-recovery"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - arcbench-shared:/mnt/arcbench
+
+  executor:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-executor:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/executor.Dockerfile
+    stop_grace_period: 6h5m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      dispatcher:
+        condition: service_started
+      runner-check:
+        condition: service_completed_successfully
+    environment:
+      # Node-local settings: use unique values/volumes for every Executor.
+      ARCBENCH_EXECUTOR_ID: ${ARCBENCH_EXECUTOR_ID:-}
+      ARCBENCH_MAX_CONCURRENT_RUNS: ${ARCBENCH_MAX_CONCURRENT_RUNS:-32}
+      ARCBENCH_PREVIEW_SOURCE_SYNC_INTERVAL_SECONDS: ${ARCBENCH_PREVIEW_SOURCE_SYNC_INTERVAL_SECONDS:-10}
+      ARCBENCH_EXECUTOR_WORKSPACE_HOST_ROOT: ${ARCBENCH_EXECUTOR_WORKSPACE_HOST_ROOT:-/var/lib/arcbench/executor-workspaces}
+      ARCBENCH_RUNNER_IMAGE: ${ARCBENCH_RUNNER_IMAGE:-${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-runner:latest}
+      ARCBENCH_RUNNER_CPU_LIMIT: ${ARCBENCH_RUNNER_CPU_LIMIT:-2}
+      ARCBENCH_RUNNER_MEMORY_LIMIT: ${ARCBENCH_RUNNER_MEMORY_LIMIT:-4g}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - arcbench-shared:/mnt/arcbench
+      - ${ARCBENCH_EXECUTOR_WORKSPACE_HOST_ROOT:-/var/lib/arcbench/executor-workspaces}:/var/lib/arcbench/executor-workspaces
+      - arcbench-executor-state:/var/lib/arcbench
+
+  previewer:
+    image: ${ARCBENCH_IMAGE_REGISTRY:-ghcr.io/your-org}/arcbench-previewer:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/previewer.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      dispatcher:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      # Node-local settings: override host/base URL and identity on each machine.
+      ARCBENCH_PREVIEWER_ID: ${ARCBENCH_PREVIEWER_ID:-}
+      ARCBENCH_PREVIEWER_PUBLIC_HOST: ${ARCBENCH_PREVIEWER_PUBLIC_HOST:-127.0.0.1}
+      ARCBENCH_PREVIEWER_PUBLIC_BASE_URL: ${ARCBENCH_PREVIEWER_PUBLIC_BASE_URL:-http://127.0.0.1}
+      ARCBENCH_PREVIEWER_PORT_START: ${ARCBENCH_PREVIEWER_PORT_START:-31000}
+      ARCBENCH_PREVIEWER_PORT_END: ${ARCBENCH_PREVIEWER_PORT_END:-31031}
+      ARCBENCH_PREVIEWER_CONCURRENCY: ${ARCBENCH_PREVIEWER_CONCURRENCY:-32}
+    ports:
+      - "${ARCBENCH_PREVIEWER_PORT_START:-31000}-${ARCBENCH_PREVIEWER_PORT_END:-31031}:${ARCBENCH_PREVIEWER_PORT_START:-31000}-${ARCBENCH_PREVIEWER_PORT_END:-31031}"
+    volumes:
+      - arcbench-shared:/mnt/arcbench:ro
+      - arcbench-previewer-workspaces:/var/lib/arcbench/previewer-workspaces
+      - arcbench-previewer-state:/var/lib/arcbench/previewer-state
+
+volumes:
+  arcbench-shared:
+  arcbench-api-state:
+  arcbench-executor-state:
+  arcbench-previewer-workspaces:
+  arcbench-previewer-state:
